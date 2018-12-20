@@ -108,7 +108,7 @@ pub fn import_blocks<F, E, R>(
 	let client = new_client::<F>(&config)?;
 	// FIXME #1134 this shouldn't need a mutable config.
 	let queue = components::FullComponents::<F>::build_import_queue(&mut config, client.clone())?;
-	queue.start(DummyLink)?;
+	queue.start(Box::new(DummyLink))?;
 
 	let (exit_send, exit_recv) = std::sync::mpsc::channel();
 	::std::thread::spawn(move || {

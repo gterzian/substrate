@@ -15,7 +15,6 @@
 // along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use protocol::Context;
 use network_libp2p::{Severity, NodeIndex};
@@ -29,6 +28,7 @@ use runtime_primitives::traits::{Block as BlockT, Header as HeaderT, As, NumberF
 use runtime_primitives::generic::BlockId;
 use message::{self, generic::Message as GenericMessage};
 use config::Roles;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // Maximum blocks to request in a single packet.
 const MAX_BLOCKS_TO_REQUEST: usize = 128;
@@ -243,8 +243,9 @@ pub struct ChainSync<B: BlockT> {
 	best_queued_number: NumberFor<B>,
 	best_queued_hash: B::Hash,
 	required_block_attributes: message::BlockAttributes,
-	import_queue: Arc<ImportQueue<B>>,
 	justifications: PendingJustifications<B>,
+	import_queue: Box<ImportQueue<B>>,
+	is_stopping: AtomicBool,
 }
 
 /// Reported sync state.
@@ -285,7 +286,7 @@ impl<B: BlockT> Status<B> {
 
 impl<B: BlockT> ChainSync<B> {
 	/// Create a new instance.
-	pub(crate) fn new(role: Roles, info: &ClientInfo<B>, import_queue: Arc<ImportQueue<B>>) -> Self {
+	pub(crate) fn new(role: Roles, info: &ClientInfo<B>, import_queue: Box<ImportQueue<B>>) -> Self {
 		let mut required_block_attributes = message::BlockAttributes::HEADER | message::BlockAttributes::JUSTIFICATION;
 		if role.intersects(Roles::FULL | Roles::AUTHORITY) {
 			required_block_attributes |= message::BlockAttributes::BODY;
@@ -300,6 +301,7 @@ impl<B: BlockT> ChainSync<B> {
 			justifications: PendingJustifications::new(),
 			required_block_attributes,
 			import_queue,
+			is_stopping: Default::default(),
 		}
 	}
 
@@ -308,7 +310,7 @@ impl<B: BlockT> ChainSync<B> {
 	}
 
 	/// Returns import queue reference.
-	pub(crate) fn import_queue(&self) -> Arc<ImportQueue<B>> {
+	pub(crate) fn import_queue(&self) -> Box<ImportQueue<B>> {
 		self.import_queue.clone()
 	}
 
@@ -550,6 +552,9 @@ impl<B: BlockT> ChainSync<B> {
 
 	/// Maintain the sync process (download new blocks, fetch justifications).
 	pub fn maintain_sync(&mut self, protocol: &mut Context<B>) {
+		if self.is_stopping.load(Ordering::SeqCst) {
+			return
+		}
 		let peers: Vec<NodeIndex> = self.peers.keys().map(|p| *p).collect();
 		for peer in peers {
 			self.download_new(protocol, peer);
@@ -568,6 +573,11 @@ impl<B: BlockT> ChainSync<B> {
 	pub fn request_justification(&mut self, hash: &B::Hash, number: NumberFor<B>, protocol: &mut Context<B>) {
 		self.justifications.queue_request(&(*hash, number));
 		self.justifications.dispatch(&mut self.peers, protocol);
+	}
+
+	pub fn stop(&self) {
+		self.is_stopping.store(true, Ordering::SeqCst);
+		self.import_queue.stop();
 	}
 
 	/// Notify about successful import of the given block.

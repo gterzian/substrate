@@ -20,7 +20,6 @@ use config::Roles;
 use consensus::BlockOrigin;
 use network_libp2p::NodeIndex;
 use sync::SyncState;
-use std::{thread, time};
 use std::collections::HashSet;
 use super::*;
 
@@ -52,12 +51,8 @@ fn sync_from_two_peers_with_ancestry_search_works() {
 fn sync_long_chain_works() {
 	let mut net = TestNet::new(2);
 	net.peer(1).push_blocks(500, false);
+	net.sync_steps(3);
 	net.sync();
-	// Wait for peer 0 to import blocks received over the network.
-	thread::sleep(time::Duration::from_millis(1000));
-	net.sync();
-	// Wait for peers to get up to speed.
-	thread::sleep(time::Duration::from_millis(1000));
 	assert!(net.peer(0).client.backend().blockchain().equals_to(net.peer(1).client.backend().blockchain()));
 }
 
@@ -113,6 +108,7 @@ fn sync_after_fork_works() {
 	// peer 1 has the best chain
 	let peer1_chain = net.peer(1).client.backend().blockchain().clone();
 	net.sync();
+
 	assert!(net.peer(0).client.backend().blockchain().canon_equals_to(&peer1_chain));
 	assert!(net.peer(1).client.backend().blockchain().canon_equals_to(&peer1_chain));
 	assert!(net.peer(2).client.backend().blockchain().canon_equals_to(&peer1_chain));
@@ -145,6 +141,7 @@ fn own_blocks_are_announced() {
 	let header = net.peer(0).client().header(&BlockId::Number(1)).unwrap().unwrap();
 	net.peer(0).on_block_imported(header.hash(), &header);
 	net.sync();
+
 	assert_eq!(net.peer(0).client.backend().blockchain().info().unwrap().best_number, 1);
 	assert_eq!(net.peer(1).client.backend().blockchain().info().unwrap().best_number, 1);
 	let peer0_chain = net.peer(0).client.backend().blockchain().clone();
