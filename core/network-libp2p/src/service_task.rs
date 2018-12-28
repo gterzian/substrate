@@ -40,7 +40,7 @@ const NODES_FILE: &str = "nodes.json";
 /// Returns a stream that must be polled regularly in order for the networking to function.
 pub fn start_service<TProtos>(
 	config: NetworkConfiguration,
-	registered_custom: TProtos,
+	registered_custom: TProtos
 ) -> Result<Service, Error>
 where TProtos: IntoIterator<Item = RegisteredProtocol> {
 
@@ -145,6 +145,8 @@ pub enum ServiceEvent {
 		protocol: ProtocolId,
 		/// Version of the protocol that was opened.
 		version: u8,
+		/// Node debug info
+		debug_info: String,
 	},
 
 	/// A custom protocol substream has been closed.
@@ -153,6 +155,8 @@ pub enum ServiceEvent {
 		node_index: NodeIndex,
 		/// Protocol that has been closed.
 		protocol: ProtocolId,
+		/// Node debug info
+		debug_info: String,
 	},
 
 	/// Sustom protocol substreams has been closed.
@@ -163,6 +167,8 @@ pub enum ServiceEvent {
 		node_index: NodeIndex,
 		/// Protocols that have been closed.
 		protocols: Vec<ProtocolId>,
+		/// Node debug info
+		debug_info: String,
 	},
 
 	/// Receives a message on a custom protocol stream.
@@ -295,6 +301,15 @@ impl Service {
 		}
 	}
 
+	/// Get debug info for a given peer.
+	pub fn peer_debug_info(&self, who: NodeIndex) -> String {
+		if let (Some(peer_id), Some(addr)) = (self.peer_id_of_node(who), self.node_endpoint(who)) {
+			format!("{:?} through {:?}", peer_id, addr)
+		} else {
+				"unknown".to_string()
+		}
+	}
+
 	/// Returns the `NodeIndex` of a peer, or assigns one if none exists.
 	fn index_of_peer_or_assign(&mut self, peer: PeerId, endpoint: ConnectedPoint) -> NodeIndex {
 		match self.index_by_id.entry(peer) {
@@ -324,6 +339,7 @@ impl Service {
 						node_index,
 						protocol: protocol_id,
 						version,
+						debug_info: self.peer_debug_info(node_index),
 					})))
 				}
 				Ok(Async::Ready(Some(CustomProtosOut::CustomProtocolClosed { protocol_id, peer_id, result }))) => {
@@ -332,6 +348,7 @@ impl Service {
 					break Ok(Async::Ready(Some(ServiceEvent::ClosedCustomProtocol {
 						node_index,
 						protocol: protocol_id,
+						debug_info: self.peer_debug_info(node_index),
 					})))
 				}
 				Ok(Async::Ready(Some(CustomProtosOut::CustomMessage { protocol_id, peer_id, data }))) => {

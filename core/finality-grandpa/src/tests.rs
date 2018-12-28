@@ -179,10 +179,7 @@ impl Network for MessageRouting {
 	fn messages_for(&self, round: u64, set_id: u64) -> Self::In {
 		let inner = self.inner.lock();
 		let peer = inner.peer(self.peer_id);
-		let mut gossip = peer.consensus_gossip().write();
-		let messages = peer.with_spec(move |_, _| {
-			gossip.messages_for(make_topic(round, set_id))
-		});
+		let messages = peer.consensus_gossip_messages_for(make_topic(round, set_id));
 
 		let messages = messages.map_err(
 			move |_| panic!("Messages for round {} dropped too early", round)
@@ -192,28 +189,21 @@ impl Network for MessageRouting {
 	}
 
 	fn send_message(&self, round: u64, set_id: u64, message: Vec<u8>) {
-		let mut inner = self.inner.lock();
+		let inner = self.inner.lock();
 		inner.peer(self.peer_id).gossip_message(make_topic(round, set_id), message, false);
-		inner.route_until_complete();
 	}
 
 	fn drop_messages(&self, round: u64, set_id: u64) {
 		let topic = make_topic(round, set_id);
 		let inner = self.inner.lock();
 		let peer = inner.peer(self.peer_id);
-		let mut gossip = peer.consensus_gossip().write();
-		peer.with_spec(move |_, _| {
-			gossip.collect_garbage(|t| t == &topic)
-		});
+        peer.consensus_gossip_collect_garbage_for(topic);
 	}
 
 	fn commit_messages(&self, set_id: u64) -> Self::In {
 		let inner = self.inner.lock();
 		let peer = inner.peer(self.peer_id);
-		let mut gossip = peer.consensus_gossip().write();
-		let messages = peer.with_spec(move |_, _| {
-			gossip.messages_for(make_commit_topic(set_id))
-		});
+        let messages = peer.consensus_gossip_messages_for(make_commit_topic(set_id));
 
 		let messages = messages.map_err(
 			move |_| panic!("Commit messages for set {} dropped too early", set_id)
@@ -223,9 +213,8 @@ impl Network for MessageRouting {
 	}
 
 	fn send_commit(&self, set_id: u64, message: Vec<u8>) {
-		let mut inner = self.inner.lock();
+		let inner = self.inner.lock();
 		inner.peer(self.peer_id).gossip_message(make_commit_topic(set_id), message, true);
-		inner.route_until_complete();
 	}
 }
 
@@ -377,7 +366,7 @@ fn run_to_completion(blocks: u64, net: Arc<Mutex<GrandpaTestNet>>, peers: &[Keyr
 		.map_err(|_| ());
 
 	let drive_to_completion = ::tokio::timer::Interval::new_interval(TEST_ROUTING_INTERVAL)
-		.for_each(move |_| { net.lock().route_until_complete(); Ok(()) })
+		.for_each(move |_| { net.lock().route_fast(); Ok(()) })
 		.map(|_| ())
 		.map_err(|_| ());
 
@@ -459,7 +448,7 @@ fn finalize_3_voters_1_observer() {
 		.map_err(|_| ());
 
 	let drive_to_completion = ::tokio::timer::Interval::new_interval(TEST_ROUTING_INTERVAL)
-		.for_each(move |_| { net.lock().route_until_complete(); Ok(()) })
+		.for_each(move |_| { net.lock().route_fast(); Ok(()) })
 		.map(|_| ())
 		.map_err(|_| ());
 
@@ -619,7 +608,7 @@ fn transition_3_voters_twice_1_observer() {
 	let drive_to_completion = ::tokio::timer::Interval::new_interval(TEST_ROUTING_INTERVAL)
 		.for_each(move |_| {
 			net.lock().send_import_notifications();
-			net.lock().sync();
+			net.lock().route_fast();
 			Ok(())
 		})
 		.map(|_| ())
