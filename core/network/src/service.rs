@@ -402,7 +402,11 @@ fn run_thread<B: BlockT + 'static>(
 				}).collect::<Vec<_>>();
 				let _ = sender.send(reply);
 			}
-			NetworkMsg::Outgoing(who, outgoing_message) => network_service_2.lock().send_custom_message(who, protocol_id, outgoing_message),
+			NetworkMsg::Outgoing(who, outgoing_message) => {
+				network_service_2
+					.lock()
+					.send_custom_message(who, protocol_id, outgoing_message);
+			},
 			NetworkMsg::ReportPeer(who, severity) => {
 				match severity {
 					Severity::Bad(_) => network_service_2.lock().ban_node(who),
@@ -411,7 +415,11 @@ fn run_thread<B: BlockT + 'static>(
 				}
 			},
 			NetworkMsg::GetPeerId(who, sender) => {
-				let node_id = network_service_2.lock().peer_id_of_node(who).cloned().map(|id| id.to_base58());
+				let node_id = network_service_2
+					.lock()
+					.peer_id_of_node(who)
+					.cloned()
+					.map(|id| id.to_base58());
 				let _ = sender.send(node_id);
 			},
 		}
@@ -443,9 +451,6 @@ fn run_thread<B: BlockT + 'static>(
 			}
 			NetworkServiceEvent::CustomMessage { node_index, data, .. } => {
 				if let Some(m) = Decode::decode(&mut (&data as &[u8])) {
-					if let GenericMessage::Status(ref status) = m {
-						trace!(target: "sync", "New peer {} {:?}", node_index, status);
-					}
 					let _ = protocol_sender.send(ProtocolMsg::CustomMessage(node_index, m));
 				} else {
 					let _ = network_sender.send(

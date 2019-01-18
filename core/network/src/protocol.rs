@@ -653,6 +653,7 @@ impl<B: BlockT, S: NetworkSpecialization<B>, H: ExHashT> Protocol<B, S, H> {
 
 	/// Called by peer to report status
 	fn on_status_message(&mut self, who: NodeIndex, status: message::Status<B>) {
+		trace!(target: "sync", "New peer {} {:?}", who, status);
 		{
 			if self.context_data.peers.contains_key(&who) {
 				debug!("Unexpected status packet from {}", who);
