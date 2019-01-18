@@ -113,8 +113,8 @@ impl fmt::Display for Severity {
 	fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
 		match self {
 			Severity::Timeout => write!(fmt, "Timeout"),
-			Severity::Useless(r) => write!(fmt, "Useless ({})", r.clone()),
-			Severity::Bad(r) => write!(fmt, "Bad ({})", r.clone()),
+			Severity::Useless(r) => write!(fmt, "Useless ({})", r),
+			Severity::Bad(r) => write!(fmt, "Bad ({})", r),
 		}
 	}
 }

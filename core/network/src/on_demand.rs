@@ -519,7 +519,7 @@ impl<Block: BlockT> RequestData<Block> {
 
 #[cfg(test)]
 pub mod tests {
-    use crossbeam_channel::{unbounded, Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
+	use crossbeam_channel::{unbounded, Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
 	use std::sync::Arc;
 	use std::time::Instant;
 	use futures::Future;
@@ -575,7 +575,6 @@ pub mod tests {
 	fn dummy(ok: bool) -> (Arc<DummyExecutor>, Arc<OnDemand<Block>>) {
 		let executor = Arc::new(DummyExecutor);
 		let service = Arc::new(OnDemand::new(Arc::new(DummyFetchChecker { ok })));
-		//service.set_service_link(Arc::downgrade(&executor));
 		(executor, service)
 	}
 

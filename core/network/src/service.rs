@@ -442,18 +442,19 @@ fn run_thread<B: BlockT + 'static>(
 				let _ = protocol_sender.send(ProtocolMsg::PeerDisconnected(node_index, debug_info));
 			}
 			NetworkServiceEvent::CustomMessage { node_index, data, .. } => {
-				match Decode::decode(&mut (&data as &[u8])) {
-					Some(m) => {
-						match m {
-							GenericMessage::Status(ref status) => trace!(target: "sync", "New peer {} {:?}", node_index, status),
-							_ => {}
-						}
-						let _ = protocol_sender.send(ProtocolMsg::CustomMessage(node_index, m));
-					},
-					None => {
-						let _ = network_sender.send(NetworkMsg::ReportPeer(node_index, Severity::Bad("Peer sent us a packet with invalid format".to_string())));
+				if let Some(m) = Decode::decode(&mut (&data as &[u8])) {
+					if let GenericMessage::Status(ref status) = m {
+						trace!(target: "sync", "New peer {} {:?}", node_index, status);
 					}
-				};
+					let _ = protocol_sender.send(ProtocolMsg::CustomMessage(node_index, m));
+				} else {
+					let _ = network_sender.send(
+						NetworkMsg::ReportPeer(
+							node_index,
+							Severity::Bad("Peer sent us a packet with invalid format".to_string())
+						)
+					);
+				}
 			}
 		}
 		Ok(())

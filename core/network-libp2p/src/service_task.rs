@@ -306,7 +306,7 @@ impl Service {
 		if let (Some(peer_id), Some(addr)) = (self.peer_id_of_node(who), self.node_endpoint(who)) {
 			format!("{:?} through {:?}", peer_id, addr)
 		} else {
-				"unknown".to_string()
+			"unknown".to_string()
 		}
 	}
 
