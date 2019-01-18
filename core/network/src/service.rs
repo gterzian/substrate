@@ -29,7 +29,6 @@ use codec::Decode;
 use config::Params;
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use error::Error;
-use message::generic::Message as GenericMessage;
 use runtime_primitives::traits::{Block as BlockT, NumberFor};
 use specialization::NetworkSpecialization;
 
@@ -439,7 +438,8 @@ fn run_thread<B: BlockT + 'static>(
 			NetworkServiceEvent::ClosedCustomProtocols { node_index, protocols, debug_info } => {
 				if !protocols.is_empty() {
 					debug_assert_eq!(protocols, &[protocol_id]);
-					let _ = protocol_sender.send(ProtocolMsg::PeerDisconnected(node_index, debug_info));
+					let _ = protocol_sender.send(
+						ProtocolMsg::PeerDisconnected(node_index, debug_info));
 				}
 			}
 			NetworkServiceEvent::OpenedCustomProtocol { node_index, version, debug_info, .. } => {
@@ -452,14 +452,14 @@ fn run_thread<B: BlockT + 'static>(
 			NetworkServiceEvent::CustomMessage { node_index, data, .. } => {
 				if let Some(m) = Decode::decode(&mut (&data as &[u8])) {
 					let _ = protocol_sender.send(ProtocolMsg::CustomMessage(node_index, m));
-				} else {
-					let _ = network_sender.send(
-						NetworkMsg::ReportPeer(
-							node_index,
-							Severity::Bad("Peer sent us a packet with invalid format".to_string())
-						)
-					);
+					return Ok(())
 				}
+				let _ = network_sender.send(
+					NetworkMsg::ReportPeer(
+						node_index,
+						Severity::Bad("Peer sent us a packet with invalid format".to_string())
+					)
+				);
 			}
 		}
 		Ok(())
