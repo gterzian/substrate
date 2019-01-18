@@ -66,7 +66,7 @@ struct TestNet<F: ServiceFactory> {
 impl<F: ServiceFactory> TestNet<F> {
 	pub fn run_until_all_full<P: Send + Sync + Fn(u32, &F::FullService) -> bool + 'static>(&mut self, predicate: P) {
 		let full_nodes = self.full_nodes.clone();
-		let interval = Interval::new_interval(Duration::from_millis(1000)).map_err(|_| ()).for_each(move |_| {
+		let interval = Interval::new_interval(Duration::from_millis(100)).map_err(|_| ()).for_each(move |_| {
 			if full_nodes.iter().all(|&(ref id, ref service)| predicate(*id, service)) {
 				Err(())
 			} else {
@@ -165,11 +165,13 @@ impl<F: ServiceFactory> TestNet<F> {
 					  .expect("Error creating test node service")))
 		));
 		nodes += authorities.len();
+
 		self.full_nodes.extend((nodes..nodes + full as usize).map(|index| (index as u32,
 			Arc::new(F::new_full(node_config::<F>(index as u32, &spec, Roles::FULL, None, base_port, &temp), executor.clone())
 				.expect("Error creating test node service")))
 		));
 		nodes += full as usize;
+
 		self._light_nodes.extend((nodes..nodes + light as usize).map(|index| (index as u32,
 			Arc::new(F::new_light(node_config::<F>(index as u32, &spec, Roles::LIGHT, None, base_port, &temp), executor.clone())
 					 .expect("Error creating test node service")))
