@@ -14,9 +14,10 @@
 // You should have received a copy of the GNU General Public License
 // along with Substrate.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::{io, thread};
+use std::io;
 use futures::{Async, Future, Stream, stream, sync::mpsc, sync::oneshot};
 use parking_lot::Mutex;
 use network_libp2p::{ProtocolId, PeerId, NetworkConfiguration, NodeIndex, ErrorKind, Severity};
@@ -32,7 +33,8 @@ use error::Error;
 use runtime_primitives::traits::{Block as BlockT, NumberFor};
 use specialization::NetworkSpecialization;
 
-use tokio::runtime::Runtime;
+use tokio::prelude::task::AtomicTask;
+use tokio::runtime::TaskExecutor;
 
 /// Type that represents fetch completion future.
 pub type FetchFuture = oneshot::Receiver<Vec<u8>>;
@@ -70,7 +72,7 @@ pub struct NetworkLink<B: BlockT> {
 	/// The protocol sender
 	pub(crate) protocol_sender: Sender<ProtocolMsg<B>>,
 	/// The network sender
-	pub(crate) network_sender: Sender<NetworkMsg>,
+	pub(crate) network_sender: NetworkChan,
 }
 
 impl<B: BlockT> Link<B> for NetworkLink<B> {
@@ -84,13 +86,13 @@ impl<B: BlockT> Link<B> for NetworkLink<B> {
 
 	fn useless_peer(&self, who: NodeIndex, reason: &str) {
 		trace!(target:"sync", "Useless peer {}, {}", who, reason);
-		let _ = self.network_sender.send(NetworkMsg::ReportPeer(who, Severity::Useless(reason.to_string())));
+		self.network_sender.send(NetworkMsg::ReportPeer(who, Severity::Useless(reason.to_string())));
 	}
 
 	fn note_useless_and_restart_sync(&self, who: NodeIndex, reason: &str) {
 		trace!(target:"sync", "Bad peer {}, {}", who, reason);
 		// is this actually malign or just useless?
-		let _ = self.network_sender.send(NetworkMsg::ReportPeer(who, Severity::Useless(reason.to_string())));
+		self.network_sender.send(NetworkMsg::ReportPeer(who, Severity::Useless(reason.to_string())));
 		let _ = self.protocol_sender.send(ProtocolMsg::RestartSync);
 	}
 
@@ -106,24 +108,20 @@ pub struct Service<B: BlockT + 'static> {
 	/// Protocol sender
 	protocol_sender: Sender<ProtocolMsg<B>>,
 	/// Network sender
-	network_sender: Sender<NetworkMsg>,
-	/// Sender for messages to the background service task, and handle for the background thread.
-	/// Dropping the sender should close the task and the thread.
-	/// This is an `Option` because we need to extract it in the destructor.
-	bg_thread: Option<(oneshot::Sender<()>, thread::JoinHandle<()>)>,
+	network_sender: NetworkChan,
 }
 
 impl<B: BlockT + 'static> Service<B> {
 	/// Creates and register protocol with the network service
 	pub fn new<I: 'static + ImportQueue<B>, S: NetworkSpecialization<B>, H: ExHashT>(
+		task_executor: TaskExecutor,
 		params: Params<B, S, H>,
 		protocol_id: ProtocolId,
 		import_queue: Arc<I>,
 	) -> Result<Arc<Service<B>>, Error> {
-		let (network_sender, network_receiver) = unbounded();
-		let network_port = NetworkPort::new(network_receiver, protocol_id);
+		let (network_chan, network_port) = network_channel(protocol_id);
 		let protocol_sender = Protocol::new(
-			network_sender.clone(),
+			network_chan.clone(),
 			params.config,
 			params.chain,
 			import_queue.clone(),
@@ -133,25 +131,25 @@ impl<B: BlockT + 'static> Service<B> {
 		)?;
 		let versions = [(protocol::CURRENT_VERSION as u8)];
 		let registered = RegisteredProtocol::new(protocol_id, &versions[..]);
-		let (thread, network) = start_thread(
+		let network = start_network(
+			task_executor,
 			protocol_sender.clone(),
 			network_port,
-			network_sender.clone(),
+			network_chan.clone(),
 			params.network_config,
 			registered,
 		)?;
 
 		let service = Arc::new(Service {
 			network,
-			network_sender: network_sender.clone(),
+			network_sender: network_chan.clone(),
 			protocol_sender: protocol_sender.clone(),
-			bg_thread: Some(thread),
 		});
 
 		// connect the import-queue to the network service.
 		let link = NetworkLink {
 			protocol_sender,
-			network_sender,
+			network_sender: network_chan,
 		};
 
 		import_queue.start(link)?;
@@ -160,7 +158,7 @@ impl<B: BlockT + 'static> Service<B> {
 	}
 
 	/// Get a clone of the channel to network/libp2p.
-	pub fn network_sender(&self) -> Sender<NetworkMsg> {
+	pub fn network_sender(&self) -> NetworkChan {
 		self.network_sender.clone()
 	}
 
@@ -215,17 +213,6 @@ impl<B: BlockT + 'static> ::consensus::SyncOracle for Service<B> {
 	}
 }
 
-impl<B: BlockT + 'static> Drop for Service<B> {
-	fn drop(&mut self) {
-		if let Some((sender, join)) = self.bg_thread.take() {
-			let _ = sender.send(());
-			if let Err(e) = join.join() {
-				error!("Error while waiting on background thread: {:?}", e);
-			}
-		}
-	}
-}
-
 impl<B: BlockT + 'static> SyncProvider<B> for Service<B> {
 	/// Get sync status
 	fn status(&self) -> ProtocolStatus<B> {
@@ -242,6 +229,13 @@ impl<B: BlockT + 'static> SyncProvider<B> for Service<B> {
 		peers.into_iter().map(|(idx, info)| {
 			(idx, network.peer_id_of_node(idx).map(|p| p.clone()), info)
 		}).collect::<Vec<_>>()
+	}
+}
+
+impl<B: BlockT + 'static> Drop for Service<B> {
+	fn drop(&mut self) {
+		self.network_sender.send(NetworkMsg::Stop);
+		let _ = self.protocol_sender.send(ProtocolMsg::Stop);
 	}
 }
 
@@ -292,29 +286,93 @@ impl<B: BlockT + 'static> ManageNetwork for Service<B> {
 	}
 }
 
+/// Create a NetworkPort/Chan pair.
+pub fn network_channel(protocol_id: ProtocolId) -> (NetworkChan, NetworkPort) {
+	let (network_sender, network_receiver) = unbounded();
+	let task_notify = Arc::new(AtomicTask::new());
+	let network_port = NetworkPort::new(network_receiver, protocol_id, task_notify.clone());
+	let network_chan = NetworkChan::new(network_sender, task_notify);
+	(network_chan, network_port)
+}
+
+
+/// A sender of NetworkMsg that notifies a task when a message has been sent.
+#[derive(Clone)]
+pub struct NetworkChan {
+	sender: Sender<NetworkMsg>,
+	task_notify: Arc<AtomicTask>,
+}
+
+impl NetworkChan {
+	/// Create a new network chan.
+	pub fn new(sender: Sender<NetworkMsg>, task_notify: Arc<AtomicTask>) -> Self {
+		Self {
+			sender,
+			task_notify,
+		}
+	}
+
+	/// Send a messaging, to be handled on a stream. Notify the task handling the stream.
+	pub fn send(&self, msg: NetworkMsg) {
+		let _ = self.sender.send(msg);
+		self.task_notify.notify();
+	}
+}
+
+impl Drop for NetworkChan {
+	/// Notifying the task when a sender is dropped(when all are dropped, the stream is finished).
+	fn drop(&mut self) {
+		self.task_notify.notify();
+	}
+}
+
 
 /// A receiver of NetworkMsg that makes the protocol-id available with each message.
-struct NetworkPort {
+pub struct NetworkPort {
 	receiver: Receiver<NetworkMsg>,
 	protocol_id: ProtocolId,
+	task_notify: Arc<AtomicTask>,
+	stopped: Cell<bool>,
 }
 
 impl NetworkPort {
 	/// Create a new network port for a given protocol-id.
-	pub fn new(receiver: Receiver<NetworkMsg>, protocol_id: ProtocolId) -> Self {
+	pub fn new(receiver: Receiver<NetworkMsg>, protocol_id: ProtocolId, task_notify: Arc<AtomicTask>) -> Self {
 		Self {
 			receiver,
-			protocol_id
+			protocol_id,
+			task_notify,
+			stopped: Cell::new(false),
 		}
 	}
 
 	/// Receive a message, if any is currently-enqueued.
+	/// Register the current tokio task for notification when a new message is available.
 	pub fn take_one_message(&self) -> Result<Option<(ProtocolId, NetworkMsg)>, ()> {
+		self.task_notify.register();
 		match self.receiver.try_recv() {
-			Ok(msg) => Ok(Some((self.protocol_id.clone(), msg))),
-			Err(TryRecvError::Empty) => Ok(None),
-			Err(TryRecvError::Disconnected) => Err(()),
+			Ok(msg) => {
+				if let NetworkMsg::Stop = msg {
+					self.stopped.set(true);
+				}
+				return Ok(Some((self.protocol_id.clone(), msg)))
+			},
+			Err(TryRecvError::Empty) => {
+				if self.stopped.get() {
+					// In case we stopped already, this prevents the case
+					// where the task is notified "too early" when the senders drop,
+					// before the channel has disconnected, and the stream doesn't shut down.
+					return Err(())
+				}
+			},
+			Err(TryRecvError::Disconnected) => return Err(()),
 		}
+		Ok(None)
+	}
+
+	/// Get a reference to the underlying crossbeam receiver.
+	pub fn receiver(&self) -> &Receiver<NetworkMsg> {
+		&self.receiver
 	}
 }
 
@@ -329,16 +387,18 @@ pub enum NetworkMsg {
 	ReportPeer(NodeIndex, Severity),
 	/// Get a peer id.
 	GetPeerId(NodeIndex, Sender<Option<String>>),
+	Stop,
 }
 
-/// Starts the background thread that handles the networking.
-fn start_thread<B: BlockT + 'static>(
+/// Spawns the futures that handle the networking.
+fn start_network<B: BlockT + 'static>(
+	task_executor: TaskExecutor,
 	protocol_sender: Sender<ProtocolMsg<B>>,
 	network_port: NetworkPort,
-	network_sender: Sender<NetworkMsg>,
+	network_sender: NetworkChan,
 	config: NetworkConfiguration,
 	registered: RegisteredProtocol,
-) -> Result<((oneshot::Sender<()>, thread::JoinHandle<()>), Arc<Mutex<NetworkService>>), Error> {
+) -> Result<Arc<Mutex<NetworkService>>, Error> {
 	let protocol_id = registered.id();
 
 	// Start the main service.
@@ -354,45 +414,19 @@ fn start_thread<B: BlockT + 'static>(
 		},
 	};
 
-	let (close_tx, close_rx) = oneshot::channel();
-	let service_clone = service.clone();
-	let mut runtime = Runtime::new()?;
-	let thread = thread::Builder::new().name("network".to_string()).spawn(move || {
-		let fut = run_thread(protocol_sender, service_clone, network_sender, network_port, protocol_id)
-			.select(close_rx.then(|_| Ok(())))
-			.map(|(val, _)| val)
-			.map_err(|(err,_ )| err);
-
-		// Note that we use `block_on` and not `block_on_all` because we want to kill the thread
-		// instantly if `close_rx` receives something.
-		match runtime.block_on(fut) {
-			Ok(()) => debug!(target: "sub-libp2p", "Networking thread finished"),
-			Err(err) => error!(target: "sub-libp2p", "Error while running libp2p: {:?}", err),
-		};
-	})?;
-
-	Ok(((close_tx, thread), service))
-}
-
-/// Runs the background thread that handles the networking.
-fn run_thread<B: BlockT + 'static>(
-	protocol_sender: Sender<ProtocolMsg<B>>,
-	network_service: Arc<Mutex<NetworkService>>,
-	network_sender: Sender<NetworkMsg>,
-	network_port: NetworkPort,
-	protocol_id: ProtocolId,
-) -> impl Future<Item = (), Error = io::Error> {
-
-	let network_service_2 = network_service.clone();
+	let network_service = service.clone();
+	let network_service_2 = service.clone();
 
 	// Protocol produces a stream of messages about what happens in sync.
 	let protocol = stream::poll_fn(move || {
 		match network_port.take_one_message() {
 			Ok(Some(message)) => Ok(Async::Ready(Some(message))),
 			Ok(None) => Ok(Async::NotReady),
-			Err(_) => Err(())
+			Err(_) => Ok(Async::Ready(None)),
 		}
-	}).for_each(move |(protocol_id, msg)| {
+	})
+	.fuse()
+	.for_each(move |(protocol_id, msg)| {
 		// Handle message from Protocol.
 		match msg {
 			NetworkMsg::PeerIds(node_idxs, sender) => {
@@ -421,19 +455,15 @@ fn run_thread<B: BlockT + 'static>(
 					.map(|id| id.to_base58());
 				let _ = sender.send(node_id);
 			},
+			NetworkMsg::Stop => network_service_2.lock().stop(),
 		}
-		Ok(())
-	})
-	.then(|res| {
-		match res {
-			Ok(()) => (),
-			Err(_) => error!("Protocol disconnected"),
-		};
 		Ok(())
 	});
 
 	// The network service produces events about what happens on the network. Let's process them.
-	let network = stream::poll_fn(move || network_service.lock().poll()).for_each(move |event| {
+	let network = stream::poll_fn(move || network_service.lock().poll())
+	.fuse()
+	.for_each(move |event| {
 		match event {
 			NetworkServiceEvent::ClosedCustomProtocols { node_index, protocols, debug_info } => {
 				if !protocols.is_empty() {
@@ -454,7 +484,7 @@ fn run_thread<B: BlockT + 'static>(
 					let _ = protocol_sender.send(ProtocolMsg::CustomMessage(node_index, m));
 					return Ok(())
 				}
-				let _ = network_sender.send(
+				network_sender.send(
 					NetworkMsg::ReportPeer(
 						node_index,
 						Severity::Bad("Peer sent us a packet with invalid format".to_string())
@@ -463,18 +493,10 @@ fn run_thread<B: BlockT + 'static>(
 			}
 		}
 		Ok(())
-	});
+		}).map_err(move |_| ());
 
-	// Merge all futures into one.
-	let futures: Vec<Box<Future<Item = (), Error = io::Error> + Send>> = vec![
-		Box::new(protocol) as Box<_>,
-		Box::new(network) as Box<_>
-	];
+	task_executor.spawn(protocol);
+	task_executor.spawn(network);
 
-	futures::select_all(futures)
-		.and_then(move |_| {
-			debug!("Networking ended");
-			Ok(())
-		})
-		.map_err(|(r, _, _)| r)
+	Ok(service)
 }

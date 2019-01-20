@@ -19,6 +19,7 @@
 #![warn(missing_docs)]
 #![warn(unused_extern_crates)]
 
+extern crate num_cpus;
 extern crate tokio;
 
 extern crate substrate_cli as cli;
@@ -51,7 +52,7 @@ mod service;
 mod params;
 
 use tokio::prelude::Future;
-use tokio::runtime::Runtime;
+use tokio::runtime::{Builder, Runtime};
 pub use cli::{VersionInfo, IntoExit};
 use substrate_service::{ServiceFactory, Roles as ServiceRoles};
 use params::{Params as NodeParams};
@@ -134,7 +135,7 @@ pub fn run<I, T, E>(args: I, exit: E, version: cli::VersionInfo) -> error::Resul
 			info!("Chain specification: {}", config.chain_spec.name());
 			info!("Node name: {}", config.name);
 			info!("Roles: {:?}", config.roles);
-			let mut runtime = Runtime::new()?;
+			let mut runtime = Builder::new().core_threads(num_cpus::get() / 2).build()?;
 			let executor = runtime.executor();
 			match config.roles == ServiceRoles::LIGHT {
 				true => run_until_exit(runtime, service::Factory::new_light(config, executor)?, exit)?,

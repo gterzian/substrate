@@ -1720,6 +1720,7 @@ dependencies = [
  "node-executor 0.1.0",
  "node-primitives 0.1.0",
  "node-runtime 0.1.0",
+ "num_cpus 1.9.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "parity-codec 2.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "slog 2.4.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "sr-io 0.1.0",

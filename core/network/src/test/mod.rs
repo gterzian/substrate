@@ -35,16 +35,17 @@ use consensus::import_queue::{Link, SharedBlockImport, Verifier};
 use consensus::Error as ConsensusError;
 use consensus::{BlockImport, BlockOrigin, ForkChoiceStrategy, ImportBlock};
 use consensus_gossip::ConsensusMessage;
-use crossbeam_channel::{after, unbounded, Receiver, Sender};
+use crossbeam_channel::{unbounded, after, Sender};
 use futures::sync::mpsc;
 use keyring::Keyring;
-use network_libp2p::{NodeIndex, Severity};
+use network_libp2p::{NodeIndex, ProtocolId, Severity};
+use parking_lot::Mutex;
 use primitives::Ed25519AuthorityId;
 use protocol::{Context, Protocol, ProtocolMsg, ProtocolStatus};
 use runtime_primitives::generic::BlockId;
 use runtime_primitives::traits::{AuthorityIdFor, Block as BlockT, Digest, DigestItem, Header, Zero};
 use runtime_primitives::Justification;
-use service::{NetworkLink, NetworkMsg, TransactionPool};
+use service::{network_channel, NetworkChan, NetworkLink, NetworkMsg, NetworkPort, TransactionPool};
 use specialization::NetworkSpecialization;
 use test_client;
 
@@ -221,9 +222,9 @@ pub type PeersClient = client::Client<test_client::Backend, test_client::Executo
 pub struct Peer<V: 'static + Verifier<Block>, D> {
 	client: Arc<PeersClient>,
 	pub protocol_sender: Sender<ProtocolMsg<Block>>,
-	network_port: Receiver<NetworkMsg>,
+	network_port: Mutex<NetworkPort>,
 	import_queue: Arc<SyncImportQueue<Block, V>>,
-	network_sender: Sender<NetworkMsg>,
+	network_sender: NetworkChan,
 	pub data: D,
 }
 
@@ -232,10 +233,11 @@ impl<V: 'static + Verifier<Block>, D> Peer<V, D> {
 		client: Arc<PeersClient>,
 		import_queue: Arc<SyncImportQueue<Block, V>>,
 		protocol_sender: Sender<ProtocolMsg<Block>>,
-		network_sender: Sender<NetworkMsg>,
-		network_port: Receiver<NetworkMsg>,
+		network_sender: NetworkChan,
+		network_port: NetworkPort,
 		data: D,
 	) -> Self {
+		let network_port = Mutex::new(network_port);
 		Peer {
 			client,
 			protocol_sender,
@@ -307,7 +309,7 @@ impl<V: 'static + Verifier<Block>, D> Peer<V, D> {
 	/// Produce the next pending message to send to another peer.
 	fn pending_message(&self) -> Option<NetworkMsg> {
 		select! {
-			recv(self.network_port) -> msg => return msg.ok(),
+			recv(self.network_port.lock().receiver()) -> msg => return msg.ok(),
 			// If there are no messages ready, give protocol a change to send one.
 			recv(after(Duration::from_millis(100))) -> _ => return None,
 		}
@@ -315,12 +317,12 @@ impl<V: 'static + Verifier<Block>, D> Peer<V, D> {
 
 	/// Produce the next pending message to send to another peer, without waiting.
 	fn pending_message_fast(&self) -> Option<NetworkMsg> {
-		self.network_port.try_recv().ok()
+		self.network_port.lock().receiver().try_recv().ok()
 	}
 
 	/// Whether this peer is done syncing (has no messages to send).
 	fn is_done(&self) -> bool {
-		self.network_port.is_empty()
+		self.network_port.lock().receiver().is_empty()
 	}
 
 	/// Execute a "sync step". This is called for each peer after it sends a packet.
@@ -497,7 +499,7 @@ pub trait TestNetFactory: Sized {
 		let tx_pool = Arc::new(EmptyTransactionPool);
 		let verifier = self.make_verifier(client.clone(), config);
 		let (block_import, data) = self.make_block_import(client.clone());
-		let (network_sender, network_port) = unbounded();
+		let (network_sender, network_port) = network_channel(ProtocolId::default());
 
 		let import_queue = Arc::new(SyncImportQueue::new(verifier, block_import));
 		let specialization = DummySpecialization { };

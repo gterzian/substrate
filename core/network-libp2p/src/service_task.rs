@@ -131,6 +131,7 @@ where TProtos: IntoIterator<Item = RegisteredProtocol> {
 		next_node_id: 1,
 		cleanup: Interval::new_interval(Duration::from_secs(60)),
 		injected_events: Vec::new(),
+		stopped: false,
 	})
 }
 
@@ -202,6 +203,8 @@ pub struct Service {
 
 	/// Events to produce on the Stream.
 	injected_events: Vec<ServiceEvent>,
+
+	stopped: bool,
 }
 
 impl Service {
@@ -391,6 +394,10 @@ impl Service {
 			}
 		}
 	}
+
+	pub fn stop(&mut self) {
+		self.stopped = true;
+	}
 }
 
 impl Drop for Service {
@@ -406,6 +413,9 @@ impl Stream for Service {
 	type Error = IoError;
 
 	fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+		if self.stopped {
+			return Ok(Async::Ready(None));
+		}
 		if !self.injected_events.is_empty() {
 			return Ok(Async::Ready(Some(self.injected_events.remove(0))));
 		}

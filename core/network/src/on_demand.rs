@@ -17,7 +17,6 @@
 //! On-demand requests service.
 
 use codec::Encode;
-use crossbeam_channel::Sender as CrossbeamSender;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Instant, Duration};
@@ -32,7 +31,7 @@ use client::light::fetcher::{Fetcher, FetchChecker, RemoteHeaderRequest,
 use message;
 use network_libp2p::{Severity, NodeIndex};
 use config::Roles;
-use service::NetworkMsg;
+use service::{NetworkChan, NetworkMsg};
 use runtime_primitives::traits::{Block as BlockT, Header as HeaderT, NumberFor};
 
 /// Remote request timeout.
@@ -52,26 +51,26 @@ pub trait OnDemandService<Block: BlockT>: Send + Sync {
 	fn on_disconnect(&self, peer: NodeIndex);
 
 	/// Maintain peers requests.
-	fn maintain_peers(&self, network_sender: &CrossbeamSender<NetworkMsg>);
+	fn maintain_peers(&self, network_sender: &NetworkChan);
 
 	/// When header response is received from remote node.
 	fn on_remote_header_response(
 		&self,
-		network_sender: &CrossbeamSender<NetworkMsg>,
+		network_sender: &NetworkChan,
 		peer: NodeIndex,
 		response: message::RemoteHeaderResponse<Block::Header>
 	);
 
 	/// When read response is received from remote node.
-	fn on_remote_read_response(&self, network_sender: &CrossbeamSender<NetworkMsg>, peer: NodeIndex, response: message::RemoteReadResponse);
+	fn on_remote_read_response(&self, network_sender: &NetworkChan, peer: NodeIndex, response: message::RemoteReadResponse);
 
 	/// When call response is received from remote node.
-	fn on_remote_call_response(&self, network_sender: &CrossbeamSender<NetworkMsg>, peer: NodeIndex, response: message::RemoteCallResponse);
+	fn on_remote_call_response(&self, network_sender: &NetworkChan, peer: NodeIndex, response: message::RemoteCallResponse);
 
 	/// When changes response is received from remote node.
 	fn on_remote_changes_response(
 		&self,
-		network_sender: &CrossbeamSender<NetworkMsg>,
+		network_sender: &NetworkChan,
 		peer: NodeIndex,
 		response: message::RemoteChangesResponse<NumberFor<Block>, Block::Hash>
 	);
@@ -90,7 +89,7 @@ pub struct RemoteResponse<T> {
 
 #[derive(Default)]
 struct OnDemandCore<B: BlockT> {
-	network_sender: Option<CrossbeamSender<NetworkMsg>>,
+	network_sender: Option<NetworkChan>,
 	next_request_id: u64,
 	pending_requests: VecDeque<Request<B>>,
 	active_peers: LinkedHashMap<NodeIndex, Request<B>>,
@@ -152,7 +151,7 @@ impl<B: BlockT> OnDemand<B> where
 	}
 
 	/// Sets weak reference to network service.
-	pub fn set_network_sender(&self, network_sender: CrossbeamSender<NetworkMsg>) {
+	pub fn set_network_sender(&self, network_sender: NetworkChan) {
 		self.core.lock().network_sender = Some(network_sender);
 	}
 
@@ -165,7 +164,7 @@ impl<B: BlockT> OnDemand<B> where
 	}
 
 	/// Try to accept response from given peer.
-	fn accept_response<F: FnOnce(Request<B>) -> Accept<B>>(&self, rtype: &str, network_sender: &CrossbeamSender<NetworkMsg>, peer: NodeIndex, request_id: u64, try_accept: F) {
+	fn accept_response<F: FnOnce(Request<B>) -> Accept<B>>(&self, rtype: &str, network_sender: &NetworkChan, peer: NodeIndex, request_id: u64, try_accept: F) {
 		let mut core = self.core.lock();
 		let request = match core.remove(peer, request_id) {
 			Some(request) => request,
@@ -236,7 +235,7 @@ impl<B> OnDemandService<B> for OnDemand<B> where
 		core.dispatch();
 	}
 
-	fn maintain_peers(&self, network_sender: &CrossbeamSender<NetworkMsg>) {
+	fn maintain_peers(&self, network_sender: &NetworkChan) {
 		let mut core = self.core.lock();
 		for bad_peer in core.maintain_peers() {
 			let _ = network_sender.send(NetworkMsg::ReportPeer(bad_peer, Severity::Timeout));
@@ -244,7 +243,7 @@ impl<B> OnDemandService<B> for OnDemand<B> where
 		core.dispatch();
 	}
 
-	fn on_remote_header_response(&self, network_sender: &CrossbeamSender<NetworkMsg>, peer: NodeIndex, response: message::RemoteHeaderResponse<B::Header>) {
+	fn on_remote_header_response(&self, network_sender: &NetworkChan, peer: NodeIndex, response: message::RemoteHeaderResponse<B::Header>) {
 		self.accept_response("header", network_sender, peer, response.id, |request| match request.data {
 			RequestData::RemoteHeader(request, sender) => match self.checker.check_header_proof(&request, response.header, response.proof) {
 				Ok(response) => {
@@ -258,7 +257,7 @@ impl<B> OnDemandService<B> for OnDemand<B> where
 		})
 	}
 
-	fn on_remote_read_response(&self, network_sender: &CrossbeamSender<NetworkMsg>, peer: NodeIndex, response: message::RemoteReadResponse) {
+	fn on_remote_read_response(&self, network_sender: &NetworkChan, peer: NodeIndex, response: message::RemoteReadResponse) {
 		self.accept_response("read", network_sender, peer, response.id, |request| match request.data {
 			RequestData::RemoteRead(request, sender) => match self.checker.check_read_proof(&request, response.proof) {
 				Ok(response) => {
@@ -272,7 +271,7 @@ impl<B> OnDemandService<B> for OnDemand<B> where
 		})
 	}
 
-	fn on_remote_call_response(&self, network_sender: &CrossbeamSender<NetworkMsg>, peer: NodeIndex, response: message::RemoteCallResponse) {
+	fn on_remote_call_response(&self, network_sender: &NetworkChan, peer: NodeIndex, response: message::RemoteCallResponse) {
 		self.accept_response("call", network_sender, peer, response.id, |request| match request.data {
 			RequestData::RemoteCall(request, sender) => match self.checker.check_execution_proof(&request, response.proof) {
 				Ok(response) => {
@@ -286,7 +285,7 @@ impl<B> OnDemandService<B> for OnDemand<B> where
 		})
 	}
 
-	fn on_remote_changes_response(&self, network_sender: &CrossbeamSender<NetworkMsg>, peer: NodeIndex, response: message::RemoteChangesResponse<NumberFor<B>, B::Hash>) {
+	fn on_remote_changes_response(&self, network_sender: &NetworkChan, peer: NodeIndex, response: message::RemoteChangesResponse<NumberFor<B>, B::Hash>) {
 		self.accept_response("changes", network_sender, peer, response.id, |request| match request.data {
 			RequestData::RemoteChanges(request, sender) => match self.checker.check_changes_proof(
 				&request, ChangesProof {
@@ -519,7 +518,6 @@ impl<Block: BlockT> RequestData<Block> {
 
 #[cfg(test)]
 pub mod tests {
-	use crossbeam_channel::{unbounded, Receiver as CrossbeamReceiver, Sender as CrossbeamSender};
 	use std::sync::Arc;
 	use std::time::Instant;
 	use futures::Future;
@@ -529,8 +527,8 @@ pub mod tests {
 		RemoteCallRequest, RemoteReadRequest, RemoteChangesRequest, ChangesProof};
 	use config::Roles;
 	use message;
-	use network_libp2p::{NodeIndex, Severity};
-	use service::NetworkMsg;
+	use network_libp2p::{NodeIndex, ProtocolId, Severity};
+	use service::{network_channel, NetworkChan, NetworkPort, NetworkMsg};
 	use super::{REQUEST_TIMEOUT, OnDemand, OnDemandService};
 	use test_client::runtime::{changes_trie_config, Block, Header};
 
@@ -583,7 +581,7 @@ pub mod tests {
 		core.idle_peers.len() + core.active_peers.len()
 	}
 
-	fn receive_call_response(on_demand: &OnDemand<Block>, network_sender: &CrossbeamSender<NetworkMsg>, peer: NodeIndex, id: message::RequestId) {
+	fn receive_call_response(on_demand: &OnDemand<Block>, network_sender: &NetworkChan, peer: NodeIndex, id: message::RequestId) {
 		on_demand.on_remote_call_response(network_sender, peer, message::RemoteCallResponse {
 			id: id,
 			proof: vec![vec![2]],
@@ -600,9 +598,9 @@ pub mod tests {
 		}
 	}
 
-	fn assert_disconnected_peer(network_port: CrossbeamReceiver<NetworkMsg>, expected_severity: Severity) {
+	fn assert_disconnected_peer(network_port: NetworkPort, expected_severity: Severity) {
 		let mut disconnect_count = 0;
-		while let Ok(msg) = network_port.try_recv() {
+		while let Ok(msg) = network_port.receiver().try_recv() {
 			match msg {
 				NetworkMsg::ReportPeer(_, severity) => {
 					if severity == expected_severity {
@@ -641,7 +639,7 @@ pub mod tests {
 	#[test]
 	fn disconnects_from_timeouted_peer() {
 		let (_x, on_demand) = dummy(true);
-		let (network_sender, network_port) = unbounded();
+		let (network_sender, network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 		on_demand.on_connect(0, Roles::FULL, 1000);
 		on_demand.on_connect(1, Roles::FULL, 1000);
@@ -668,7 +666,7 @@ pub mod tests {
 	#[test]
 	fn disconnects_from_peer_on_response_with_wrong_id() {
 		let (_x, on_demand) = dummy(true);
-		let (network_sender, network_port) = unbounded();
+		let (network_sender, network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 		on_demand.on_connect(0, Roles::FULL, 1000);
 
@@ -687,7 +685,7 @@ pub mod tests {
 	#[test]
 	fn disconnects_from_peer_on_incorrect_response() {
 		let (_x, on_demand) = dummy(false);
-		let (network_sender, network_port) = unbounded();
+		let (network_sender, network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 		on_demand.remote_call(RemoteCallRequest {
 			block: Default::default(),
@@ -706,7 +704,7 @@ pub mod tests {
 	#[test]
 	fn disconnects_from_peer_on_unexpected_response() {
 		let (_x, on_demand) = dummy(true);
-		let (network_sender, network_port) = unbounded();
+		let (network_sender, network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 		on_demand.on_connect(0, Roles::FULL, 1000);
 
@@ -717,7 +715,7 @@ pub mod tests {
 	#[test]
 	fn disconnects_from_peer_on_wrong_response_type() {
 		let (_x, on_demand) = dummy(false);
-		let (network_sender, network_port) = unbounded();
+		let (network_sender, network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 		on_demand.on_connect(0, Roles::FULL, 1000);
 
@@ -743,7 +741,7 @@ pub mod tests {
 
 		let retry_count = 2;
 		let (_x, on_demand) = dummy(false);
-		let (network_sender, _network_port) = unbounded();
+		let (network_sender, _network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 		for i in 0..retry_count+1 {
 			on_demand.on_connect(i, Roles::FULL, 1000);
@@ -783,7 +781,7 @@ pub mod tests {
 	#[test]
 	fn receives_remote_call_response() {
 		let (_x, on_demand) = dummy(true);
-		let (network_sender, _network_port) = unbounded();
+		let (network_sender, _network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 		on_demand.on_connect(0, Roles::FULL, 1000);
 
@@ -806,7 +804,7 @@ pub mod tests {
 	#[test]
 	fn receives_remote_read_response() {
 		let (_x, on_demand) = dummy(true);
-		let (network_sender, _network_port) = unbounded();
+		let (network_sender, _network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 		on_demand.on_connect(0, Roles::FULL, 1000);
 
@@ -831,7 +829,7 @@ pub mod tests {
 	#[test]
 	fn receives_remote_header_response() {
 		let (_x, on_demand) = dummy(true);
-		let (network_sender, _network_port) = unbounded();
+		let (network_sender, _network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 		on_demand.on_connect(0, Roles::FULL, 1000);
 
@@ -866,7 +864,7 @@ pub mod tests {
 	#[test]
 	fn receives_remote_changes_response() {
 		let (_x, on_demand) = dummy(true);
-		let (network_sender, _network_port) = unbounded();
+		let (network_sender, _network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 		on_demand.on_connect(0, Roles::FULL, 1000);
 
@@ -897,7 +895,7 @@ pub mod tests {
 	#[test]
 	fn does_not_sends_request_to_peer_who_has_no_required_block() {
 		let (_x, on_demand) = dummy(true);
-		let (network_sender, _network_port) = unbounded();
+		let (network_sender, _network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 
 		on_demand.on_connect(1, Roles::FULL, 100);
@@ -949,7 +947,7 @@ pub mod tests {
 		// loop forever after dispatching a request to the last peer, since the
 		// last peer was not updated
 		let (_x, on_demand) = dummy(true);
-		let (network_sender, _network_port) = unbounded();
+		let (network_sender, _network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 
 		on_demand.remote_header(RemoteHeaderRequest {
@@ -974,7 +972,7 @@ pub mod tests {
 	#[test]
 	fn tries_to_send_all_pending_requests() {
 		let (_x, on_demand) = dummy(true);
-		let (network_sender, _network_port) = unbounded();
+		let (network_sender, _network_port) = network_channel(ProtocolId::default());
 		on_demand.set_network_sender(network_sender.clone());
 
 		on_demand.remote_header(RemoteHeaderRequest {

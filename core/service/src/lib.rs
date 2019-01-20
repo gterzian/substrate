@@ -191,6 +191,7 @@ impl<Components: components::Components> Service<Components> {
 
 		let has_bootnodes = !network_params.network_config.boot_nodes.is_empty();
 		let network = network::Service::new(
+			task_executor.clone(),
 			network_params,
 			protocol_id,
 			import_queue
