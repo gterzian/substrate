@@ -189,14 +189,25 @@ impl<B: BlockT> PendingJustifications<B> {
 		}
 	}
 
+	/// Process the import of a justification.
+	/// Queues a retry in case the import failed.
+	fn justification_import_result(&mut self, hash: B::Hash, number: NumberFor<B>, success: bool) {
+		let request = (hash, number);
+		if success {
+			self.justifications.remove(&request);
+			self.previous_requests.remove(&request);
+			return;
+		}
+		self.pending_requests.push_front(request);
+	}
+
 	/// Processes the response for the request previously sent to the given
-	/// peer. Queues a retry in case the import fails or the given justification
+	/// peer. Queues a retry in case the given justification
 	/// was `None`.
 	fn on_response(
 		&mut self,
 		who: NodeIndex,
 		justification: Option<Justification>,
-		protocol: &mut Context<B>,
 		import_queue: &ImportQueue<B>,
 	) {
 		// we assume that the request maps to the given response, this is
@@ -204,23 +215,13 @@ impl<B: BlockT> PendingJustifications<B> {
 		// messages to chain sync.
 		if let Some(request) = self.peer_requests.remove(&who) {
 			if let Some(justification) = justification {
-				if import_queue.import_justification(request.0, request.1, justification) {
-					self.justifications.remove(&request);
-					self.previous_requests.remove(&request);
-					return;
-				} else {
-					protocol.report_peer(
-						who,
-						Severity::Bad(format!("Invalid justification provided for #{}", request.0)),
-					);
-				}
-			} else {
-				self.previous_requests
-					.entry(request)
-					.or_insert(Vec::new())
-					.push((who, Instant::now()));
+				import_queue.import_justification(who.clone(), request.0, request.1, justification);
+				return
 			}
-
+			self.previous_requests
+				.entry(request)
+				.or_insert(Vec::new())
+				.push((who, Instant::now()));
 			self.pending_requests.push_front(request);
 		}
 	}
@@ -530,7 +531,6 @@ impl<B: BlockT> ChainSync<B> {
 						self.justifications.on_response(
 							who,
 							response.justification,
-							protocol,
 							&*self.import_queue,
 						);
 					},
@@ -573,6 +573,10 @@ impl<B: BlockT> ChainSync<B> {
 	pub fn request_justification(&mut self, hash: &B::Hash, number: NumberFor<B>, protocol: &mut Context<B>) {
 		self.justifications.queue_request(&(*hash, number));
 		self.justifications.dispatch(&mut self.peers, protocol);
+	}
+
+	pub fn justification_import_result(&mut self, hash: B::Hash, number: NumberFor<B>, success: bool) {
+		self.justifications.justification_import_result(hash, number, success);
 	}
 
 	pub fn stop(&self) {

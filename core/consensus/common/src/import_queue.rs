@@ -96,7 +96,7 @@ pub trait ImportQueue<B: BlockT>: Send + Sync + ImportQueueClone<B> {
 	/// Import bunch of blocks.
 	fn import_blocks(&self, origin: BlockOrigin, blocks: Vec<IncomingBlock<B>>);
 	/// Import a block justification.
-	fn import_justification(&self, hash: B::Hash, number: NumberFor<B>, justification: Justification) -> bool;
+	fn import_justification(&self, who: Origin, hash: B::Hash, number: NumberFor<B>, justification: Justification);
 }
 
 pub trait ImportQueueClone<B: BlockT> {
@@ -196,13 +196,11 @@ impl<B: BlockT> ImportQueue<B> for BasicQueue<B> {
 			.expect("Failed to send ImportBlocks to ImportQueue");
 	}
 
-	fn import_justification(&self, hash: B::Hash, number: NumberFor<B>, justification: Justification) -> bool {
-		let (sender, port) = unbounded();
+	fn import_justification(&self, who: Origin, hash: B::Hash, number: NumberFor<B>, justification: Justification) {
 		let _ = self
 			.sender
-			.send(BlockImportMsg::ImportJustification(hash, number, justification, sender))
+			.send(BlockImportMsg::ImportJustification(who, hash, number, justification))
 			.expect("Failed to send IsImporting");
-		port.recv().expect("Failed to receive IsImporting")
 	}
 }
 
@@ -211,7 +209,7 @@ pub enum BlockImportMsg<B: BlockT> {
 	Clear,
 	Status(Sender<ImportQueueStatus<B>>),
 	IsImporting(B::Hash, Sender<bool>),
-	ImportJustification(B::Hash, NumberFor<B>, Justification, Sender<bool>),
+	ImportJustification(Origin, B::Hash, NumberFor<B>, Justification),
 	Start(Box<Link<B>>),
 	Stop,
 }
@@ -299,8 +297,8 @@ impl<B: BlockT> BlockImporter<B> {
 			BlockImportMsg::IsImporting(hash, reply_sender) => {
 				self.handle_is_importing(hash, reply_sender)
 			}
-			BlockImportMsg::ImportJustification(hash, number, justification, reply_sender) => {
-				self.handle_import_justification(hash, number, justification, reply_sender)
+			BlockImportMsg::ImportJustification(who, hash, number, justification) => {
+				self.handle_import_justification(who, hash, number, justification)
 			}
 			BlockImportMsg::Start(link) => {
 				if let Some(justification_import) = self.justification_import.as_ref() {
@@ -392,11 +390,13 @@ impl<B: BlockT> BlockImporter<B> {
 		let _ = reply_sender.send(self.queue_blocks.contains(&hash));
 	}
 
-	fn handle_import_justification(&self, hash: B::Hash, number: NumberFor<B>, justification: Justification, sender: Sender<bool>) {
-		let result = self.justification_import.as_ref().map(|justification_import| {
+	fn handle_import_justification(&self, who: Origin, hash: B::Hash, number: NumberFor<B>, justification: Justification) {
+		let success = self.justification_import.as_ref().map(|justification_import| {
 			justification_import.import_justification(hash, number, justification).is_ok()
 		}).unwrap_or(false);
-		let _ = sender.send(result);
+		if let Some(link) = self.link.as_ref() {
+			link.justification_imported(who, &hash, number, success);
+		}
 	}
 
 	fn handle_import_blocks(&mut self, origin: BlockOrigin, blocks: Vec<IncomingBlock<B>>) {
@@ -504,6 +504,8 @@ impl<B: BlockT, V: 'static + Verifier<B>> BlockImportWorker<B, V> {
 pub trait Link<B: BlockT>: Send {
 	/// Block imported.
 	fn block_imported(&self, _hash: &B::Hash, _number: NumberFor<B>) { }
+	/// Justification import result.
+	fn justification_imported(&self, _who: Origin, _hash: &B::Hash, _number: NumberFor<B>, _success: bool) { }
 	/// Request a justification for the given block.
 	fn request_justification(&self, _hash: &B::Hash, _number: NumberFor<B>) { }
 	/// Maintain sync.
