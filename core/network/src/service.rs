@@ -24,7 +24,7 @@ use network_libp2p::{start_service, parse_str_addr, Service as NetworkService, S
 use network_libp2p::{Protocol as Libp2pProtocol, RegisteredProtocol};
 use consensus::import_queue::{ImportQueue, Link};
 use consensus_gossip::ConsensusGossip;
-use protocol::{self, Context, Protocol, ProtocolMsg, ProtocolStatus, PeerInfo};
+use protocol::{self, Context, FromNetworkMsg, Protocol, ProtocolMsg, ProtocolStatus, PeerInfo};
 use codec::Decode;
 use config::Params;
 use crossbeam_channel::{self as channel, Receiver, Sender, TryRecvError};
@@ -132,7 +132,7 @@ impl<B: BlockT + 'static, S: NetworkSpecialization<B>> Service<B, S> {
 		import_queue: Box<ImportQueue<B>>,
 	) -> Result<(Arc<Service<B, S>>, NetworkChan), Error> {
 		let (network_chan, network_port) = network_channel(protocol_id);
-		let protocol_sender = Protocol::new(
+		let (protocol_sender, network_to_protocol_sender) = Protocol::new(
 			network_chan.clone(),
 			params.config,
 			params.chain,
@@ -144,7 +144,7 @@ impl<B: BlockT + 'static, S: NetworkSpecialization<B>> Service<B, S> {
 		let versions = [(protocol::CURRENT_VERSION as u8)];
 		let registered = RegisteredProtocol::new(protocol_id, &versions[..]);
 		let (thread, network) = start_thread(
-			protocol_sender.clone(),
+			network_to_protocol_sender,
 			network_port,
 			network_chan.clone(),
 			params.network_config,
@@ -428,8 +428,8 @@ pub enum NetworkMsg {
 }
 
 /// Starts the background thread that handles the networking.
-fn start_thread<B: BlockT + 'static, S: NetworkSpecialization<B>>(
-	protocol_sender: Sender<ProtocolMsg<B, S>>,
+fn start_thread<B: BlockT + 'static>(
+	protocol_sender: Sender<FromNetworkMsg<B>>,
 	network_port: NetworkPort,
 	network_sender: NetworkChan,
 	config: NetworkConfiguration,
@@ -471,8 +471,8 @@ fn start_thread<B: BlockT + 'static, S: NetworkSpecialization<B>>(
 }
 
 /// Runs the background thread that handles the networking.
-fn run_thread<B: BlockT + 'static, S: NetworkSpecialization<B>>(
-	protocol_sender: Sender<ProtocolMsg<B, S>>,
+fn run_thread<B: BlockT + 'static>(
+	protocol_sender: Sender<FromNetworkMsg<B>>,
 	network_service: Arc<Mutex<NetworkService>>,
 	network_sender: NetworkChan,
 	network_port: NetworkPort,
@@ -535,19 +535,19 @@ fn run_thread<B: BlockT + 'static, S: NetworkSpecialization<B>>(
 				if !protocols.is_empty() {
 					debug_assert_eq!(protocols, &[protocol_id]);
 					let _ = protocol_sender.send(
-						ProtocolMsg::PeerDisconnected(node_index, debug_info));
+						FromNetworkMsg::PeerDisconnected(node_index, debug_info));
 				}
 			}
 			NetworkServiceEvent::OpenedCustomProtocol { node_index, version, debug_info, .. } => {
 				debug_assert_eq!(version, protocol::CURRENT_VERSION as u8);
-				let _ = protocol_sender.send(ProtocolMsg::PeerConnected(node_index, debug_info));
+				let _ = protocol_sender.send(FromNetworkMsg::PeerConnected(node_index, debug_info));
 			}
 			NetworkServiceEvent::ClosedCustomProtocol { node_index, debug_info, .. } => {
-				let _ = protocol_sender.send(ProtocolMsg::PeerDisconnected(node_index, debug_info));
+				let _ = protocol_sender.send(FromNetworkMsg::PeerDisconnected(node_index, debug_info));
 			}
 			NetworkServiceEvent::CustomMessage { node_index, data, .. } => {
 				if let Some(m) = Decode::decode(&mut (&data as &[u8])) {
-					let _ = protocol_sender.send(ProtocolMsg::CustomMessage(node_index, m));
+					let _ = protocol_sender.send(FromNetworkMsg::CustomMessage(node_index, m));
 					return Ok(())
 				}
 				let _ = network_sender.send(
@@ -562,10 +562,10 @@ fn run_thread<B: BlockT + 'static, S: NetworkSpecialization<B>>(
 				for msg_bytes in messages.iter().take(5) {
 					if let Some(msg) = Decode::decode(&mut (&msg_bytes as &[u8])) {
 						debug!(target: "sync", "{:?}", msg);
-						let _ = protocol_sender.send(ProtocolMsg::PeerClogged(node_index, Some(msg)));
+						let _ = protocol_sender.send(FromNetworkMsg::PeerClogged(node_index, Some(msg)));
 					} else {
 						debug!(target: "sync", "{:?}", msg_bytes);
-						let _ = protocol_sender.send(ProtocolMsg::PeerClogged(node_index, None));
+						let _ = protocol_sender.send(FromNetworkMsg::PeerClogged(node_index, None));
 					}
 				}
 			}

@@ -42,7 +42,7 @@ use keyring::Keyring;
 use network_libp2p::{NodeIndex, ProtocolId, Severity};
 use parking_lot::Mutex;
 use primitives::{H256, Ed25519AuthorityId};
-use protocol::{Context, Protocol, ProtocolMsg, ProtocolStatus};
+use protocol::{Context, FromNetworkMsg, Protocol, ProtocolMsg, ProtocolStatus};
 use runtime_primitives::generic::BlockId;
 use runtime_primitives::traits::{AuthorityIdFor, Block as BlockT, Digest, DigestItem, Header, NumberFor};
 use runtime_primitives::Justification;
@@ -117,6 +117,7 @@ pub type PeersClient = client::Client<test_client::Backend, test_client::Executo
 pub struct Peer<D> {
 	client: Arc<PeersClient>,
 	pub protocol_sender: Sender<ProtocolMsg<Block, DummySpecialization>>,
+	network_to_protocol_sender: Sender<FromNetworkMsg<Block>>,
 	network_port: Mutex<NetworkPort>,
 	pub import_queue: Box<ImportQueue<Block>>,
 	network_sender: NetworkChan,
@@ -128,6 +129,7 @@ impl<D> Peer<D> {
 		client: Arc<PeersClient>,
 		import_queue: Box<ImportQueue<Block>>,
 		protocol_sender: Sender<ProtocolMsg<Block, DummySpecialization>>,
+		network_to_protocol_sender: Sender<FromNetworkMsg<Block>>,
 		network_sender: NetworkChan,
 		network_port: NetworkPort,
 		data: D,
@@ -136,6 +138,7 @@ impl<D> Peer<D> {
 		Peer {
 			client,
 			protocol_sender,
+			network_to_protocol_sender,
 			import_queue,
 			network_sender,
 			network_port,
@@ -174,14 +177,14 @@ impl<D> Peer<D> {
 
 	/// Called on connection to other indicated peer.
 	fn on_connect(&self, other: NodeIndex) {
-		let _ = self.protocol_sender.send(ProtocolMsg::PeerConnected(other, String::new()));
+		let _ = self.network_to_protocol_sender.send(FromNetworkMsg::PeerConnected(other, String::new()));
 	}
 
 	/// Called on disconnect from other indicated peer.
 	fn on_disconnect(&self, other: NodeIndex) {
 		let _ = self
-			.protocol_sender
-			.send(ProtocolMsg::PeerDisconnected(other, String::new()));
+			.network_to_protocol_sender
+			.send(FromNetworkMsg::PeerDisconnected(other, String::new()));
 	}
 
 	/// Receive a message from another peer. Return a set of peers to disconnect.
@@ -189,8 +192,8 @@ impl<D> Peer<D> {
 		match Decode::decode(&mut (&msg as &[u8])) {
 			Some(m) => {
 				let _ = self
-					.protocol_sender
-					.send(ProtocolMsg::CustomMessage(from, m));
+					.network_to_protocol_sender
+					.send(FromNetworkMsg::CustomMessage(from, m));
 			}
 			None => {
 				let _ = self.network_sender.send(NetworkMsg::ReportPeer(
@@ -452,7 +455,7 @@ pub trait TestNetFactory: Sized {
 
 		let import_queue = Box::new(BasicQueue::new(verifier, block_import, justification_import));
 		let specialization = DummySpecialization {};
-		let protocol_sender = Protocol::new(
+		let (protocol_sender, network_to_protocol_sender) = Protocol::new(
 			network_sender.clone(),
 			config.clone(),
 			client.clone(),
@@ -466,6 +469,7 @@ pub trait TestNetFactory: Sized {
 			client,
 			import_queue,
 			protocol_sender,
+			network_to_protocol_sender,
 			network_sender,
 			network_port,
 			data,

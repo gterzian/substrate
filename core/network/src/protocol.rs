@@ -57,6 +57,7 @@ const LIGHT_MAXIMAL_BLOCKS_DIFFERENCE: u64 = 8192;
 pub struct Protocol<B: BlockT, S: NetworkSpecialization<B>, H: ExHashT> {
 	network_chan: NetworkChan,
 	port: Receiver<ProtocolMsg<B, S>>,
+	from_network_port: Receiver<FromNetworkMsg<B>>,
 	config: ProtocolConfig,
 	on_demand: Option<Arc<OnDemandService<B>>>,
 	genesis_hash: B::Hash,
@@ -238,14 +239,20 @@ impl<B: BlockT, F: FnOnce(&mut ConsensusGossip<B>, &mut Context<B>)> GossipTask<
     }
 }
 
-/// Messages sent to Protocol.
-pub enum ProtocolMsg<B: BlockT, S: NetworkSpecialization<B>,> {
+/// Messages sent from the networking layer.
+pub enum FromNetworkMsg<B: BlockT> {
 	/// A peer connected, with debug info.
 	PeerConnected(NodeIndex, String),
 	/// A peer disconnected, with debug info.
 	PeerDisconnected(NodeIndex, String),
 	/// A custom message from another peer.
 	CustomMessage(NodeIndex, Message<B>),
+	/// Let protocol know a peer is currenlty clogged.
+	PeerClogged(NodeIndex, Option<Message<B>>),
+}
+
+/// Messages sent to Protocol.
+pub enum ProtocolMsg<B: BlockT, S: NetworkSpecialization<B>> {
 	/// Ask the protocol for its status.
 	Status(Sender<ProtocolStatus<B>>),
 	/// Tell protocol to propagate extrinsics.
@@ -262,8 +269,6 @@ pub enum ProtocolMsg<B: BlockT, S: NetworkSpecialization<B>,> {
 	IsOffline(Sender<bool>),
 	/// Return a list of peers currently known to protocol.
 	Peers(Sender<Vec<(NodeIndex, PeerInfo<B>)>>),
-	/// Let protocol know a peer is currenlty clogged.
-	PeerClogged(NodeIndex, Option<Message<B>>),
 	/// Tell protocol to maintain sync.
 	MaintainSync,
 	/// Tell protocol to restart sync.
@@ -290,6 +295,11 @@ pub enum ProtocolMsg<B: BlockT, S: NetworkSpecialization<B>,> {
 	Tick,
 }
 
+enum Incoming<B: BlockT, S: NetworkSpecialization<B>> {
+	FromNetwork(FromNetworkMsg<B>),
+	FromClient(ProtocolMsg<B, S>)
+}
+
 impl<B: BlockT, S: NetworkSpecialization<B>, H: ExHashT> Protocol<B, S, H> {
 	/// Create a new instance.
 	pub fn new(
@@ -300,8 +310,9 @@ impl<B: BlockT, S: NetworkSpecialization<B>, H: ExHashT> Protocol<B, S, H> {
 		on_demand: Option<Arc<OnDemandService<B>>>,
 		transaction_pool: Arc<TransactionPool<H, B>>,
 		specialization: S,
-	) -> error::Result<Sender<ProtocolMsg<B, S>>> {
+	) -> error::Result<(Sender<ProtocolMsg<B, S>>, Sender<FromNetworkMsg<B>>)> {
 		let (sender, port) = channel::unbounded();
+		let (from_network_sender, from_network_port) = channel::bounded(1);
 		let info = chain.info()?;
 		let sync = ChainSync::new(config.roles, &info, import_queue);
 		let _ = thread::Builder::new()
@@ -310,6 +321,7 @@ impl<B: BlockT, S: NetworkSpecialization<B>, H: ExHashT> Protocol<B, S, H> {
 				let mut protocol = Protocol {
 					network_chan,
 					port,
+					from_network_port,
 					config: config,
 					context_data: ContextData {
 						peers: HashMap::new(),
@@ -330,7 +342,7 @@ impl<B: BlockT, S: NetworkSpecialization<B>, H: ExHashT> Protocol<B, S, H> {
 				}
 			})
 			.expect("Protocol thread spawning failed");
-		Ok(sender)
+		Ok((sender, from_network_sender))
 	}
 
 	fn run(
@@ -341,24 +353,54 @@ impl<B: BlockT, S: NetworkSpecialization<B>, H: ExHashT> Protocol<B, S, H> {
 		let msg = select! {
 			recv(self.port) -> event => {
 				match event {
-					Ok(msg) => msg,
+					Ok(msg) => Incoming::FromClient(msg),
 					// Our sender has been dropped, quit.
 					Err(_) => {
-						ProtocolMsg::Stop
+						Incoming::FromClient(ProtocolMsg::Stop)
+					},
+				}
+			},
+			recv(self.from_network_port) -> event => {
+				match event {
+					Ok(msg) => Incoming::FromNetwork(msg),
+					// Our sender has been dropped, quit.
+					Err(_) => {
+						Incoming::FromClient(ProtocolMsg::Stop)
 					},
 				}
 			},
 			recv(tick_timeout) -> _ => {
-				ProtocolMsg::Tick
+				Incoming::FromClient(ProtocolMsg::Tick)
 			},
 			recv(propagate_timeout) -> _ => {
-				ProtocolMsg::PropagateExtrinsics
+				Incoming::FromClient(ProtocolMsg::PropagateExtrinsics)
 			},
 		};
 		self.handle_msg(msg)
 	}
 
-	fn handle_msg(&mut self, msg: ProtocolMsg<B, S>) -> bool {
+	fn handle_msg(&mut self, msg: Incoming<B, S>) -> bool {
+		match msg {
+			Incoming::FromNetwork(msg) => {
+				self.handle_network_msg(msg);
+				true
+			},
+			Incoming::FromClient(msg) => self.handle_client_msg(msg)
+		}
+	}
+
+	fn handle_network_msg(&mut self, msg: FromNetworkMsg<B>) {
+		match msg {
+			FromNetworkMsg::PeerDisconnected(who, debug_info) => self.on_peer_disconnected(who, debug_info),
+			FromNetworkMsg::PeerConnected(who, debug_info) => self.on_peer_connected(who, debug_info),
+			FromNetworkMsg::PeerClogged(who, message) => self.on_clogged_peer(who, message),
+			FromNetworkMsg::CustomMessage(who, message) => {
+				self.on_custom_message(who, message)
+			},
+		};
+	}
+
+	fn handle_client_msg(&mut self, msg: ProtocolMsg<B, S>) -> bool {
 		match msg {
 			ProtocolMsg::Peers(sender) => {
 				let peers = self.context_data.peers.iter().map(|(idx, p)| {
@@ -373,12 +415,6 @@ impl<B: BlockT, S: NetworkSpecialization<B>, H: ExHashT> Protocol<B, S, H> {
 					)
 				}).collect();
 				let _ = sender.send(peers);
-			},
-			ProtocolMsg::PeerDisconnected(who, debug_info) => self.on_peer_disconnected(who, debug_info),
-			ProtocolMsg::PeerConnected(who, debug_info) => self.on_peer_connected(who, debug_info),
-			ProtocolMsg::PeerClogged(who, message) => self.on_clogged_peer(who, message),
-			ProtocolMsg::CustomMessage(who, message) => {
-				self.on_custom_message(who, message)
 			},
 			ProtocolMsg::Status(sender) => self.status(sender),
 			ProtocolMsg::BlockImported(hash, header) => self.on_block_imported(hash, &header),

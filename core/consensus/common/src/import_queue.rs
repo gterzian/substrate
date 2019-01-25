@@ -25,7 +25,7 @@
 //! instantiated simply.
 
 use crate::block_import::{ImportBlock, BlockImport, JustificationImport, ImportResult, BlockOrigin};
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -245,7 +245,7 @@ impl<B: BlockT> BlockImporter<B> {
 		worker_sender: Sender<BlockImportWorkerMsg<B>>,
 		justification_import: Option<SharedJustificationImport<B>>,
 	) -> Sender<BlockImportMsg<B>> {
-		let (sender, port) = unbounded();
+		let (sender, port) = bounded(1);
 		let _ = thread::Builder::new()
 			.name("ImportQueue".into())
 			.spawn(move || {
@@ -429,7 +429,7 @@ impl<B: BlockT, V: 'static + Verifier<B>> BlockImportWorker<B, V> {
 		verifier: Arc<V>,
 		block_import: SharedBlockImport<B>,
 	) -> Sender<BlockImportWorkerMsg<B>> {
-		let (sender, port) = unbounded();
+		let (sender, port) = bounded(1);
 		let _ = thread::Builder::new()
 			.name("ImportQueueWorker".into())
 			.spawn(move || {
