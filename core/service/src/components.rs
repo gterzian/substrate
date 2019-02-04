@@ -53,8 +53,7 @@ pub type FullExecutor<F> = client::LocalCallExecutor<
 /// Light client backend type for a factory.
 pub type LightBackend<F> = client::light::backend::Backend<
 	client_db::light::LightStorage<<F as ServiceFactory>::Block>,
-	network::OnDemand<<F as ServiceFactory>::Block>,
-	Blake2Hasher,
+	network::OnDemand<<F as ServiceFactory>::Block>
 >;
 
 /// Light client executor type for a factory.
@@ -64,7 +63,7 @@ pub type LightExecutor<F> = client::light::call_executor::RemoteCallExecutor<
 		network::OnDemand<<F as ServiceFactory>::Block>
 	>,
 	network::OnDemand<<F as ServiceFactory>::Block>,
-	Blake2Hasher,
+	Blake2Hasher
 >;
 
 /// Full client type for a factory.
