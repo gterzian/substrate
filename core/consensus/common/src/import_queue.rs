@@ -473,21 +473,26 @@ impl<B: BlockT, V: 'static + Verifier<B>> BlockImportWorker<B, V> {
 
 		let mut results = vec![];
 
+		let mut has_error = false;
+
 		// Blocks in the response/drain should be in ascending order.
 		for block in blocks {
-			let import_result = import_single_block(
-				&*self.block_import,
-				origin.clone(),
-				block.clone(),
-				self.verifier.clone(),
-			);
-
+			let import_result = if has_error {
+				Err(BlockImportError::Error)
+			} else {
+   				import_single_block(
+   					&*self.block_import,
+   					origin.clone(),
+   					block.clone(),
+   					self.verifier.clone(),
+   				)
+			};
 			let was_ok = import_result.is_ok();
 			results.push((import_result, block.hash));
 			if was_ok {
 				imported = imported + 1;
 			} else {
-				break;
+				has_error = true;
 			}
 		}
 
