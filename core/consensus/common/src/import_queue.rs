@@ -25,7 +25,7 @@
 //! instantiated simply.
 
 use crate::block_import::{ImportBlock, BlockImport, JustificationImport, ImportResult, BlockOrigin};
-use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
+use crossbeam_channel::{self as channel, Receiver, Sender};
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -138,7 +138,7 @@ impl<B: BlockT> BasicQueue<B> {
 		block_import: SharedBlockImport<B>,
 		justification_import: Option<SharedJustificationImport<B>>
 	) -> Self {
-		let (result_sender, result_port) = unbounded();
+		let (result_sender, result_port) = channel::unbounded();
 		let worker_sender = BlockImportWorker::new(result_sender, verifier, block_import);
 		let importer_sender = BlockImporter::new(result_port, worker_sender, justification_import);
 
@@ -169,7 +169,7 @@ impl<B: BlockT> ImportQueue<B> for BasicQueue<B> {
 	}
 
 	fn status(&self) -> ImportQueueStatus<B> {
-		let (sender, port) = unbounded();
+		let (sender, port) = channel::unbounded();
 		let _ = self
 			.sender
 			.send(BlockImportMsg::Status(sender))
@@ -178,7 +178,7 @@ impl<B: BlockT> ImportQueue<B> for BasicQueue<B> {
 	}
 
 	fn is_importing(&self, hash: &B::Hash) -> bool {
-		let (sender, port) = unbounded();
+		let (sender, port) = channel::unbounded();
 		let _ = self
 			.sender
 			.send(BlockImportMsg::IsImporting(hash.clone(), sender))
@@ -245,7 +245,7 @@ impl<B: BlockT> BlockImporter<B> {
 		worker_sender: Sender<BlockImportWorkerMsg<B>>,
 		justification_import: Option<SharedJustificationImport<B>>,
 	) -> Sender<BlockImportMsg<B>> {
-		let (sender, port) = bounded(1);
+		let (sender, port) = channel::bounded(1);
 		let _ = thread::Builder::new()
 			.name("ImportQueue".into())
 			.spawn(move || {
@@ -429,7 +429,7 @@ impl<B: BlockT, V: 'static + Verifier<B>> BlockImportWorker<B, V> {
 		verifier: Arc<V>,
 		block_import: SharedBlockImport<B>,
 	) -> Sender<BlockImportWorkerMsg<B>> {
-		let (sender, port) = bounded(1);
+		let (sender, port) = channel::bounded(1);
 		let _ = thread::Builder::new()
 			.name("ImportQueueWorker".into())
 			.spawn(move || {
